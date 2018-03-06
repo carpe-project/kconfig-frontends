@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <libgen.h>
+#include <errno.h>
 
 #include "lkc.h"
 
@@ -259,6 +261,7 @@ static void zconf_endhelp(void)
 /*
  * Try to open specified file with following names:
  * ./name
+ * dirname(current_file)/name
  * $(srctree)/name
  * The latter is used when srctree is separate from objtree
  * when compiling the kernel.
@@ -266,16 +269,67 @@ static void zconf_endhelp(void)
  */
 FILE *zconf_fopen(const char *name)
 {
-	char *env, fullname[PATH_MAX+1];
+	char *env, fullname[PATH_MAX+1], parentpath[PATH_MAX+1], temppath[PATH_MAX+1], *pp;
 	FILE *f;
+  size_t bytesleft;
+  struct file *parent;
+  struct parent_file {
+    struct file *file;
+    struct parent_file *child;
+    struct parent_file *parent;
+  };
+  struct parent_file *parents, *op;
 
 	f = fopen(name, "r");
 	if (!f && name != NULL && name[0] != '/') {
-		env = getenv(SRCTREE);
-		if (env) {
-			sprintf(fullname, "%s/%s", env, name);
-			f = fopen(fullname, "r");
-		}
+    if (current_file) {
+      parents = NULL;
+      parent = current_file;
+      if (parent->name[0] == '/') {
+        strncpy(temppath, parent->name, PATH_MAX);
+        strncpy(parentpath, dirname(temppath), PATH_MAX);
+      } else {
+        parents = op = NULL;
+        do {
+          op = parents;
+          parents = malloc(sizeof(struct parent_file));
+          parents->file = parent;
+          parents->child = op;
+          if (parents->child)
+            parents->child->parent = parents;
+          parent = parent->parent;
+        } while (parent && (parents->file->name[0] != '/'));
+
+        bytesleft = PATH_MAX;
+        parentpath[0] = 0;
+        op = parents;
+        do {
+          strncpy(temppath, op->file->name, PATH_MAX);
+          pp = dirname(temppath);
+          strncat(parentpath, pp, bytesleft);
+          bytesleft = PATH_MAX - strlen(parentpath);
+          strncat(parentpath, "/", bytesleft);
+          bytesleft--;
+          op = op->child;
+        } while (bytesleft && op);
+      }
+      sprintf(fullname, "%s/%s", parentpath, name);
+      f = fopen(fullname, "r");
+
+      /* cleanup */
+      while (parents) {
+        op = parents->child;
+        free(parents);
+        parents = op;
+      }
+    }
+    if (!f) {
+      env = getenv(SRCTREE);
+      if (env) {
+        sprintf(fullname, "%s/%s", env, name);
+        f = fopen(fullname, "r");
+      }
+    }
 	}
 	return f;
 }
@@ -297,44 +351,47 @@ void zconf_initscan(const char *name)
 
 void zconf_nextfile(const char *name)
 {
-	struct file *iter;
 	struct file *file = file_lookup(name);
-	struct buffer *buf = xmalloc(sizeof(*buf));
-	memset(buf, 0, sizeof(*buf));
 
-	current_buf->state = YY_CURRENT_BUFFER;
-	yyin = zconf_fopen(file->name);
-	if (!yyin) {
+	FILE *next_file = zconf_fopen(file->name);
+	if (!next_file) {
 		printf("%s:%d: can't open file \"%s\"\n",
 		    zconf_curname(), zconf_lineno(), file->name);
-		exit(1);
-	}
-	yy_switch_to_buffer(yy_create_buffer(yyin, YY_BUF_SIZE));
-	buf->parent = current_buf;
-	current_buf = buf;
+    file_unlist(file);
+	} else {
+    struct buffer *buf = xmalloc(sizeof(*buf));
+    memset(buf, 0, sizeof(*buf));
 
-	for (iter = current_file->parent; iter; iter = iter->parent ) {
-		if (!strcmp(current_file->name,iter->name) ) {
-			printf("%s:%d: recursive inclusion detected. "
-			       "Inclusion path:\n  current file : '%s'\n",
-			       zconf_curname(), zconf_lineno(),
-			       zconf_curname());
-			iter = current_file->parent;
-			while (iter && \
-			       strcmp(iter->name,current_file->name)) {
-				printf("  included from: '%s:%d'\n",
-				       iter->name, iter->lineno-1);
-				iter = iter->parent;
-			}
-			if (iter)
-				printf("  included from: '%s:%d'\n",
-				       iter->name, iter->lineno+1);
-			exit(1);
-		}
-	}
-	file->lineno = 1;
-	file->parent = current_file;
-	current_file = file;
+    yyin = next_file;
+    current_buf->state = YY_CURRENT_BUFFER;
+    yy_switch_to_buffer(yy_create_buffer(yyin, YY_BUF_SIZE));
+    buf->parent = current_buf;
+    current_buf = buf;
+
+    struct file *iter;
+    for (iter = current_file->parent; iter; iter = iter->parent ) {
+      if (!strcmp(current_file->name,iter->name) ) {
+        printf("%s:%d: recursive inclusion detected. "
+            "Inclusion path:\n  current file : '%s'\n",
+            zconf_curname(), zconf_lineno(),
+            zconf_curname());
+        iter = current_file->parent;
+        while (iter && \
+            strcmp(iter->name,current_file->name)) {
+          printf("  included from: '%s:%d'\n",
+              iter->name, iter->lineno-1);
+          iter = iter->parent;
+        }
+        if (iter)
+          printf("  included from: '%s:%d'\n",
+              iter->name, iter->lineno+1);
+        exit(1);
+      }
+    }
+    file->lineno = 1;
+    file->parent = current_file;
+    current_file = file;
+  }
 }
 
 static void zconf_endfile(void)

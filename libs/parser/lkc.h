@@ -122,6 +122,7 @@ void menu_set_type(int type);
 
 /* util.c */
 struct file *file_lookup(const char *name);
+void file_unlist(struct file* file);
 int file_write_dep(const char *name);
 void *xmalloc(size_t size);
 void *xcalloc(size_t nmemb, size_t size);
@@ -190,6 +191,11 @@ static inline bool sym_is_optional(struct symbol *sym)
 static inline bool sym_has_value(struct symbol *sym)
 {
 	return sym->flags & SYMBOL_DEF_USER ? true : false;
+}
+
+static inline bool sym_is_shaveapp(struct symbol *sym)
+{
+  return sym->flags & SYMBOL_SHAVEAPP ? true : false;
 }
 
 #ifdef __cplusplus
